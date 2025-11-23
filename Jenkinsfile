@@ -17,7 +17,10 @@ pipeline {
         REMOTE_HOST = "3.39.164.132"            // 원격(spring) 서버 IP(Public IP)
         REMOTE_DIR = "/home/ec2-user/deploy"    // 원격 서버에 파일 복사할 경로
         
-        SSH_CREDENTIALS_ID = "5d033547-b193-4154-8196-099fec00558b"                 // Jenkins SSH 자격 증명 ID
+        SSH_CREDENTIALS_ID = "5d033547-b193-4154-8196-099fec00558b" // Jenkins SSH 자격 증명 ID
+
+        //Jenkins Secret File ID
+        SECRET_FILE_ID = "d78b3ee3-82d4-4359-9d9a-d7592c5f69ca"
     }
 
     stages {
@@ -42,17 +45,32 @@ pipeline {
             }
         }
 
-        stage('Copy to Remote Server') {
+        stage('Inject Spring Config (Secret File)') {
             steps {
-                // Jenkins가 원격 서버에 SSH 접속할 수 있도록 sshagent 사용
-                sshagent (credentials: [env.SSH_CREDENTIALS_ID]) {
-                    // 원격 서버에 배포 디렉토리 생성 (없으면 새로 만듦)
-                    sh "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${REMOTE_USER}@${REMOTE_HOST} \"mkdir -p ${REMOTE_DIR}\""
-                    // JAR 파일과 Dockerfile을 원격 서버에 복사
-                    sh "scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${JAR_FILE_NAME} Dockerfile ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/"
+                withCredentials([file(credentialsId: env.SECRET_FILE_ID, variable: 'SPRING_CONFIG_FILE')]) {
+                    sh """
+                        echo "[INFO] Using secret file: $SPRING_CONFIG_FILE"
+                        cp \$SPRING_CONFIG_FILE ./application-prod.properties
+                    """
                 }
             }
         }
+
+        stage('Copy to Remote Server') {
+            steps {
+                sshagent(credentials: [env.SSH_CREDENTIALS_ID]) {
+                    sh """
+                        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${REMOTE_USER}@${REMOTE_HOST} "mkdir -p ${REMOTE_DIR}"
+                        scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                            ${JAR_FILE_NAME} \
+                            application-prod.properties \
+                            Dockerfile \
+                            ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/
+                    """
+                }
+            }
+        }
+
         stage('Remote Docker Build & Deploy') {
             steps{
                 sshagent(credentials: [env.SSH_CREDENTIALS_ID]) {
@@ -60,8 +78,10 @@ pipeline {
 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${REMOTE_USER}@${REMOTE_HOST} << ENDSSH
     cd ${REMOTE_DIR} || exit 1
     docker rm -f ${CONTAINER_NAME} || true
-    docker build -t ${DOCKER_IMAGE} .
-    docker run -d --name ${CONTAINER_NAME} -p ${PORT}:${PORT} ${DOCKER_IMAGE}
+    docker build --build-arg PROFILE=prod -t ${DOCKER_IMAGE} .    
+    docker run -d --name ${CONTAINER_NAME} -p ${PORT}:${PORT} \
+        -e SPRING_PROFILES_ACTIVE=prod \
+        ${DOCKER_IMAGE}
 ENDSSH
                     """
                 }
